@@ -1,0 +1,80 @@
+name: Daily Scale Rx Email
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 8 AM Eastern is 12:00 UTC during daylight saving time and 13:00 UTC during standard time.
+    # The guard step below lets only the run that is currently 8 AM in America/New_York continue.
+    - cron: "0 12,13 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-scale-rx-email
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check 8 AM Eastern
+        id: eastern_time
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$(TZ=America/New_York date +%H)" = "08" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out repository
+        if: steps.eastern_time.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: steps.eastern_time.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.eastern_time.outputs.should_run == 'true'
+        run: npm ci
+
+      - name: Run tests
+        if: steps.eastern_time.outputs.should_run == 'true'
+        run: npm test
+
+      - name: Send daily email
+        if: steps.eastern_time.outputs.should_run == 'true'
+        env:
+          SCALE_RX_EMAIL_TO: ${{ secrets.SCALE_RX_EMAIL_TO }}
+          SCALE_RX_EMAIL_FROM: ${{ secrets.SCALE_RX_EMAIL_FROM }}
+          SCALE_RX_SMTP_HOST: ${{ secrets.SCALE_RX_SMTP_HOST }}
+          SCALE_RX_SMTP_PORT: ${{ secrets.SCALE_RX_SMTP_PORT }}
+          SCALE_RX_SMTP_USER: ${{ secrets.SCALE_RX_SMTP_USER }}
+          SCALE_RX_SMTP_PASS: ${{ secrets.SCALE_RX_SMTP_PASS }}
+        run: node src/cli.js --email
+
+      - name: Commit updated history
+        if: steps.eastern_time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          if git diff --quiet -- data/history.json; then
+            echo "No history changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/history.json
+          git commit -m "Update Scale Rx history"
+          git push
